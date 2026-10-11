@@ -1,0 +1,242 @@
+---
+title: "Customer Segmentation Using R Programming"
+subtitle: "Unsupervised segmentation of customers by age, income and spending behaviour"
+author: "[Your Name]"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: cosmo
+    df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, out.width = "90%", fig.align = "center")
+
+# Locate the project root (folder containing run_project.R) so paths work no
+# matter where the report is rendered from.
+find_root <- function(start = getwd()) {
+  d <- normalizePath(start, winslash = "/")
+  repeat {
+    if (file.exists(file.path(d, "run_project.R"))) return(d)
+    p <- dirname(d)
+    if (identical(p, d)) stop("Project root not found. Render this report from inside the project folder.")
+    d <- p
+  }
+}
+root <- find_root()
+knitr::opts_knit$set(root.dir = root)
+
+need <- function(rel) {
+  p <- file.path(root, rel)
+  if (!file.exists(p)) stop("Missing '", rel, "'. Run `Rscript run_project.R` first to generate the analysis results.")
+  p
+}
+
+info    <- read.csv(need("outputs/tables/dataset_info.csv"), stringsAsFactors = FALSE)
+quality <- read.csv(need("outputs/tables/data_quality_summary.csv"), stringsAsFactors = FALSE)
+outl    <- read.csv(need("outputs/tables/outlier_summary.csv"), stringsAsFactors = FALSE)
+stats_t <- read.csv(need("outputs/tables/summary_statistics.csv"), stringsAsFactors = FALSE)
+gender  <- read.csv(need("outputs/tables/gender_summary.csv"), stringsAsFactors = FALSE)
+corr    <- read.csv(need("outputs/tables/correlation_matrix.csv"), stringsAsFactors = FALSE)
+eval_k  <- read.csv(need("outputs/tables/cluster_evaluation.csv"), stringsAsFactors = FALSE)
+model   <- read.csv(need("outputs/tables/model_evaluation.csv"), stringsAsFactors = FALSE)
+prof    <- read.csv(need("outputs/tables/segment_profiles.csv"), stringsAsFactors = FALSE)
+recs    <- read.csv(need("outputs/tables/business_recommendations.csv"), stringsAsFactors = FALSE)
+seg     <- read.csv(need("data/processed/segmented_customers.csv"), stringsAsFactors = FALSE)
+
+is_synthetic <- identical(info$Dataset_Type[1], "synthetic")
+k_final      <- model$Value[model$Metric == "K (clusters)"]
+avg_sil      <- model$Value[model$Metric == "Average silhouette width"]
+bss_tss      <- model$Value[model$Metric == "Between-SS / Total-SS (%)"]
+n_customers  <- nrow(seg)
+largest      <- prof[which.max(prof$Customers), ]
+top_spender  <- prof[which.max(prof$Avg_Spending_Score), ]
+
+plot_path <- function(name) file.path("outputs", "plots", name)
+```
+
+```{r synthetic-note, results='asis'}
+if (is_synthetic) {
+  cat("> **Data notice:** the figures in this report are based on a **synthetic demonstration dataset** generated for this project. They illustrate the method and are **not** findings about real customers. Place `Mall_Customers.csv` in `data/raw/` and re-run `run_project.R` to analyse the public Mall Customers dataset.\n")
+}
+```
+
+# Executive Summary
+
+This project segments **`r n_customers` customers** into **`r k_final` groups** using k-means clustering on three standardised variables: age, annual income and spending score. The segmentation has an average silhouette width of **`r avg_sil`**, so cluster separation is `r if (avg_sil >= 0.5) "reasonably strong" else if (avg_sil >= 0.25) "moderate (clusters overlap somewhat)" else "weak"`.
+
+The largest segment is **`r largest$Segment`** (`r largest$Customers` customers, `r largest$Percent`% of the base). The segment with the highest average spending score is **`r top_spender$Segment`** (`r top_spender$Avg_Spending_Score`). Section 9 describes every segment and Section 11 translates them into marketing hypotheses to test. These recommendations are hypotheses, not proven causal effects, and the project does not predict churn.
+
+# Business Problem
+
+Marketing budgets are limited, and treating every customer the same wastes them. A retailer needs to know:
+
+- which customers are the most valuable and deserve loyalty benefits,
+- which customers have spending capacity but do not use it,
+- which customers spend little and may need a different approach, and
+- how to target campaigns instead of sending the same message to everyone.
+
+Customer segmentation answers these questions by grouping customers with similar behaviour.
+
+# Project Objectives
+
+1. Build a reproducible, end-to-end segmentation workflow in R.
+2. Clean and validate the data without silently discarding valid observations.
+3. Explore age, income, gender and spending patterns.
+4. Choose the number of segments using the elbow method and silhouette analysis, with interpretation rather than a single metric.
+5. Profile every segment and label it from its observed statistics.
+6. Translate segments into evidence-based, testable marketing hypotheses.
+
+# Dataset Description
+
+```{r dataset}
+knitr::kable(data.frame(Item = c("Dataset type", "Source file", "Rows", "Columns", "Note"),
+                        Value = c(info$Dataset_Type[1], info$Source_File[1], info$Rows[1], info$Columns[1], info$Note[1])),
+             caption = "Dataset used in this run")
+```
+
+Variables used: **CustomerID** (identifier, never used for clustering), **Gender** (categorical, used only for description), **Age** (years), **Annual_Income** (thousand dollars) and **Spending_Score** (index from 1 to 100 assigned by the retailer). Full details, license and limitations are in `data/README.md`.
+
+# Data Cleaning
+
+```{r cleaning}
+knitr::kable(quality, col.names = c("Check", "Value"), caption = "Data quality summary")
+```
+
+The cleaning strategy never modifies the raw file and never silently deletes valid observations:
+
+- exact duplicate rows are removed and logged; conflicting identifiers stop the pipeline for manual review;
+- missing numeric values are median-imputed only when they affect at most 5% of rows;
+- out-of-range values and IQR outliers are **flagged and kept**, because extreme but plausible customers (for example very high earners) are exactly what a segmentation should capture.
+
+```{r outliers}
+knitr::kable(outl, caption = "Outlier summary using the 1.5 x IQR rule (observations retained)")
+```
+
+# Exploratory Data Analysis
+
+```{r eda-stats}
+knitr::kable(stats_t, caption = "Summary statistics of the clustering features")
+```
+
+```{r eda-gender}
+knitr::kable(gender, caption = "Gender distribution")
+```
+
+```{r eda-plots, fig.cap="Distributions of age, annual income and spending score."}
+knitr::include_graphics(c(plot_path("age_distribution.png"),
+                          plot_path("income_distribution.png"),
+                          plot_path("spending_distribution.png")))
+```
+
+```{r eda-scatter, fig.cap="Relationships between income, age and spending score."}
+knitr::include_graphics(c(plot_path("income_vs_spending.png"), plot_path("age_vs_spending.png")))
+```
+
+```{r eda-corr, fig.cap="Correlation matrix of the numerical variables."}
+knitr::include_graphics(plot_path("correlation_matrix.png"))
+```
+
+```{r eda-box, fig.cap="Boxplots used to inspect outliers."}
+knitr::include_graphics(plot_path("boxplots_outliers.png"))
+```
+
+Correlation values between the clustering features are shown below; weak correlations mean the variables carry largely independent information, which suits clustering.
+
+```{r corr-table}
+knitr::kable(corr, caption = "Pearson correlation matrix")
+```
+
+# Methodology
+
+1. **Feature selection:** Age, Annual_Income and Spending_Score. CustomerID and Gender are excluded from the model.
+2. **Standardisation:** each feature is converted to a z-score with `scale()` so that variables measured on different scales contribute equally to Euclidean distances.
+3. **K-means clustering:** `stats::kmeans()` with `nstart = 50` random restarts and a fixed seed for reproducibility.
+4. **Evaluation:** within-cluster sum of squares (elbow method) and average silhouette width (`cluster::silhouette()`).
+5. **Visualisation:** principal component analysis (PCA) projects the three standardised features onto two dimensions.
+6. **Interpretation:** clusters are profiled in original units and labelled from their observed statistics.
+
+No labels or outcome variables are used, so there is no train/test split and no target leakage; scaling and clustering use exactly the same feature columns.
+
+# Optimal Cluster Selection
+
+```{r eval-table}
+knitr::kable(eval_k, caption = "Cluster evaluation for each candidate K")
+```
+
+```{r eval-plots, fig.cap="Elbow method and silhouette analysis."}
+knitr::include_graphics(c(plot_path("elbow_plot.png"), plot_path("silhouette_analysis.png")))
+```
+
+Choosing K needs interpretation; **no single metric decides it**. The elbow is often ambiguous and the silhouette can keep rising for larger K even when extra clusters add little business value. This project reports both metrics and applies a transparent starting rule: choose the smallest K of at least 3 whose silhouette is within 0.03 of the best silhouette. This run selected **K = `r k_final`**. The choice should always be checked against the segment profiles below, and can be overridden with `CONFIG$k_final` in `R/01_data_loading.R`.
+
+# Customer Segment Profiles
+
+```{r profile-table}
+knitr::kable(prof[, c("Cluster", "Segment", "Customers", "Percent", "Avg_Age", "Avg_Annual_Income", "Avg_Spending_Score")],
+             caption = "Segment profiles (Avg_Annual_Income in thousand dollars; Avg_Spending_Score on a 1-100 scale)")
+```
+
+Labels are assigned from the data: a segment's average income and spending score are compared with the overall averages (z-scores with a +/-0.5 threshold). The evidence for each label:
+
+```{r label-evidence, results='asis'}
+cat(paste0("- **", prof$Segment, "**: ", prof$Rationale, ".", collapse = "\n"), "\n")
+```
+
+# Visualizations
+
+```{r viz-clusters, fig.cap="Customer segments in PCA space and by income and spending score."}
+knitr::include_graphics(c(plot_path("cluster_pca.png"), plot_path("cluster_income_vs_spending.png")))
+```
+
+```{r viz-segments, fig.cap="Segment sizes, average metrics and positions."}
+knitr::include_graphics(c(plot_path("segment_sizes.png"),
+                          plot_path("segment_average_metrics.png"),
+                          plot_path("segment_income_vs_spending.png")))
+```
+
+```{r viz-sil, fig.cap="Silhouette widths of the final model."}
+if (file.exists(file.path(root, plot_path("final_silhouette.png")))) knitr::include_graphics(plot_path("final_silhouette.png"))
+```
+
+The final model's between-cluster variance is **`r bss_tss`%** of the total variance.
+
+# Business Insights
+
+> **Read this first:** these are **hypotheses to test** (for example with A/B tests), not proven causal effects. Segments describe observed behaviour. No churn data exists in this dataset and no churn model is implemented.
+
+```{r recs, results='asis'}
+for (i in seq_len(nrow(recs))) {
+  r <- recs[i, ]
+  cat("### ", r$Segment, "\n\n", sep = "")
+  cat("- **Evidence:** ", r$Evidence, "\n", sep = "")
+  cat("- **Recommended action:** ", r$Recommended_Action, "\n", sep = "")
+  cat("- **Hypothesis to test:** ", r$Hypothesis_To_Test, "\n", sep = "")
+  cat("- **Suggested KPIs:** ", r$Suggested_KPIs, "\n\n", sep = "")
+}
+```
+
+# Limitations
+
+- `r if (is_synthetic) "This run uses a synthetic dataset, so the segments illustrate the method rather than real customer behaviour." else "The Mall Customers dataset is a small (200-row) teaching dataset whose collection method is not documented."`
+- Only three variables are used; real segmentation would add purchase history, recency, frequency, product categories and channel.
+- Spending Score is an index defined by the data provider, not revenue or profit.
+- K-means assumes roughly spherical clusters of similar size and is sensitive to outliers and scaling choices.
+- The number of clusters is a judgement call; different reasonable K values give different segmentations.
+- Segments are a snapshot in time; customer behaviour changes.
+- Recommendations are untested hypotheses, and no churn prediction is performed.
+
+# Future Enhancements
+
+- Add recency-frequency-monetary (RFM) features from transaction data.
+- Compare k-means with hierarchical clustering, k-medoids (PAM) and Gaussian mixture models, and check segment stability with bootstrapping.
+- Build a Shiny dashboard for interactive exploration.
+- Run controlled A/B tests of the recommended actions to measure real campaign uplift.
+- With genuine churn data, add a supervised churn model using the segments as features.
+
+# Conclusion
+
+The pipeline produced **`r k_final` customer segments** from `r n_customers` customers: `r paste(prof$Segment, collapse = "; ")`. The segments are reproducible (fixed seed), based on standardised features, evaluated with two complementary metrics, and translated into testable marketing hypotheses. They give marketing teams a data-driven starting point for targeting, to be validated with experiments and richer data.

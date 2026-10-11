@@ -1,0 +1,30 @@
+Package: customersegmentationr
+Type: Package
+Title: Customer Segmentation Using R Programming
+Version: 1.0.0
+Authors@R: person("Your", "Name", email = "your.email@example.com", role = c("aut", "cre"))
+Description: An end-to-end data analytics project that cleans customer data,
+    explores purchasing behaviour, selects the number of clusters with the
+    elbow method and silhouette analysis, segments customers with k-means,
+    profiles each segment and generates evidence-based marketing hypotheses.
+    This file documents project metadata and package dependencies; the project
+    is run with run_project.R and is not an installable R package.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends:
+    R (>= 4.1.0)
+Imports:
+    cluster,
+    corrplot,
+    dplyr,
+    factoextra,
+    ggplot2 (>= 3.4.0),
+    readr,
+    rlang,
+    scales,
+    tibble,
+    tidyr
+Suggests:
+    knitr,
+    renv,
+    rmarkdown
